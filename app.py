@@ -3,6 +3,8 @@ import smtplib
 import random
 import asyncio
 import threading
+import time
+import requests
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -21,6 +23,22 @@ config = {
 }
 log_lines = []
 lock = threading.Lock()
+
+# ========== 自動Pingによるスリープ回避 ==========
+SLEEP_PREVENT_INTERVAL = 280  # 約4分ごとに自分自身へPing
+render_url = ""  # Render側が起動後に自動的にURLを持つので空欄でOK
+
+def self_ping_loop():
+    """Render無料プランのスリープを回避：自分自身に定期的にアクセス"""
+    time.sleep(10)  # 起動直後に1回実行
+    while True:
+        try:
+            if render_url:
+                requests.get(render_url, timeout=10)
+                add_log(f"🔄 スリープ回避Ping 実行")
+        except:
+            pass
+        time.sleep(SLEEP_PREVENT_INTERVAL)
 
 # ========== スパム文 4パターン ==========
 SPAM_PATTERNS = [
@@ -125,9 +143,6 @@ INDEX_HTML = """
         .stop { background: #cc0000; color: #fff; }
         button:disabled { opacity: 0.4; cursor: not-allowed; }
         pre { background: #111; padding: 15px; border-radius: 8px; white-space: pre-wrap; height: 350px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 10px; }
-        .ok { color: #0f0; }
-        .err { color: #f55; }
-        .info { color: #5af; }
     </style>
 </head>
 <body>
@@ -243,4 +258,18 @@ def get_log():
 
 if __name__ == "__main__":
     add_log("🚀 サーバー起動完了")
+    
+    # ✅ RenderのURLを環境変数から自動取得
+    RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+    if RENDER_EXTERNAL_URL:
+        render_url = RENDER_EXTERNAL_URL
+        add_log(f"✅ RenderURL自動取得: {render_url}")
+    else:
+        render_url = "http://localhost:8080"
+    
+    # ✅ スリープ回避Pingを別スレッドで起動
+    ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
+    ping_thread.start()
+    add_log("✅ スリープ回避Ping 起動完了（約4分ごとに実行）")
+    
     app.run(host="0.0.0.0", port=8080, debug=False)
