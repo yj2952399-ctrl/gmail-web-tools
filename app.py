@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, session
 import smtplib
 import random
 import threading
@@ -6,27 +6,17 @@ import time
 import requests
 import os
 import re
+import uuid
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
+app.secret_key = os.urandom(32).hex()
 
-# ========== グローバル状態 ==========
-is_running = False
-stop_flag = threading.Event()
-sent_count = 0
-config = {
-    "accounts": [],
-    "to_address": "",
-    "interval": 3.0,
-    "max_count": 0,
-    "subject": "【重要】お知らせ"
-}
-log_lines = []
+user_sessions = {}
 lock = threading.Lock()
 
-# ========== 自動Pingによるスリープ回避 ==========
 SLEEP_PREVENT_INTERVAL = 280
 render_url = ""
 
@@ -36,12 +26,10 @@ def self_ping_loop():
         try:
             if render_url:
                 requests.get(render_url, timeout=10)
-                add_log(f"🔄 スリープ回避Ping 実行")
         except:
             pass
         time.sleep(SLEEP_PREVENT_INTERVAL)
 
-# ========== 複数アカウントの解析 ==========
 def parse_accounts(text):
     text = text.strip()
     if not text:
@@ -57,7 +45,6 @@ def parse_accounts(text):
             accounts.append({"address": addr.strip(), "password": pw.strip()})
     return accounts
 
-# ========== スパム文 4パターン ==========
 SPAM_PATTERNS = [
     """お前らみたいな負け組のチー牛が何を言っても無駄だっての😂
 一生その狭い頭で妄想繰り返してろよ、現実では誰にも相手にされてないくせに🤣
@@ -76,46 +63,37 @@ SPAM_PATTERNS = [
 ただの哀れな負け犬として一生終わるんだな、かわいそうに😂😂😂"""
 ]
 
-# ========== ログ出力 ==========
-def add_log(text):
+def get_user_id():
+    if 'uid' not in session:
+        session['uid'] = str(uuid.uuid4())[:8]
+    return session['uid']
+
+def add_user_log(uid, text):
     t = datetime.now().strftime("%H:%M:%S")
     line = f"[{t}] {text}"
     with lock:
-        log_lines.append(line)
-        if len(log_lines) > 200:
-            log_lines.pop(0)
-    print(line)
+        if uid in user_sessions:
+            user_sessions[uid]['logs'].append(line)
+            if len(user_sessions[uid]['logs']) > 200:
+                user_sessions[uid]['logs'].pop(0)
+    print(f"[{uid}] {text}")
 
-# ========== メール送信本体 ==========
-def send_email_thread():
-    global is_running, sent_count
-    is_running = True
+def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
     sent_count = 0
-    stop_flag.clear()
-
-    accounts = config["accounts"]
-    to_address = config["to_address"]
-    interval = config["interval"]
-    max_count = config["max_count"]
-    subject = config["subject"]
-
-    if not accounts:
-        add_log("❌ Gmailアカウントが未設定")
-        return
-    if not to_address:
-        add_log("❌ 送信先アドレスが未設定")
-        return
-
-    max_txt = "無限" if max_count == 0 else f"{max_count} 通"
-    add_log(f"✅ アカウント数: {len(accounts)} 個")
-    add_log(f"✅ 送信開始 → {to_address}")
-    add_log(f"⏱ 送信間隔: {interval}秒 / 📤 送信回数: {max_txt}")
-
     account_index = 0
     success_total = 0
     fail_total = 0
+    stop_flag = user_sessions[uid]['stop_flag']
+
+    user_sessions[uid]['is_running'] = True
+    stop_flag.clear()
 
     try:
+        max_txt = "無限" if max_count == 0 else f"{max_count} 通"
+        add_user_log(uid, f"✅ アカウント数: {len(accounts)} 個")
+        add_user_log(uid, f"✅ 送信開始 → {to_address}")
+        add_user_log(uid, f"⏱ 送信間隔: {interval}秒 / 📤 送信回数: {max_txt}")
+
         while not stop_flag.is_set():
             sent_count += 1
             acc = accounts[account_index]
@@ -131,33 +109,44 @@ def send_email_thread():
             msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
             try:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
                     server.login(acc["address"], acc["password"])
                     server.send_message(msg)
-                add_log(f"✅ {sent_count} 通目 [{acc['address']}] 送信成功")
+                add_user_log(uid, f"✅ {sent_count} 通目 [{acc['address']}] 送信成功")
                 success_total += 1
             except Exception as e:
-                add_log(f"❌ {sent_count} 通目 [{acc['address']}] 失敗: {str(e)[:80]}")
+                err = str(e)
+                add_user_log(uid, f"❌ {sent_count} 通目 失敗: {err[:100]}")
                 fail_total += 1
-                if "Authentication" in str(e) or "Username and Password not accepted" in str(e):
-                    add_log("⚠️ 認証エラー → アドレス/パスワード確認")
+                if "Authentication" in err or "Username and Password" in err:
+                    add_user_log(uid, "⚠️ 認証エラー → アドレス/パスワード（アプリパスワード16文字）を確認")
+                    add_user_log(uid, "💡 パスワードにスペースが入ってる？ それは正しいです")
+                    break
+                if "timed out" in err.lower():
+                    add_user_log(uid, "⚠️ 接続タイムアウト → Googleが拒否した可能性 間隔を延ばしてみて")
+                if stop_flag.is_set():
+                    add_user_log(uid, "🛑 送信中に停止されました")
+                    break
                 stop_flag.wait(2)
                 continue
 
+            # ✅ 指定回数に達したら自動停止 → 明確にログ表示
             if max_count > 0 and sent_count >= max_count:
-                add_log(f"✅ 指定 {max_count} 通に到達 自動停止")
+                add_user_log(uid, f"✅ ✅ 指定の {max_count} 通に到達 → 自動停止します")
                 break
 
             if not stop_flag.is_set():
                 stop_flag.wait(interval)
 
     except Exception as e:
-        add_log(f"💥 エラー: {str(e)}")
+        add_user_log(uid, f"💥 エラー: {str(e)}")
     finally:
-        is_running = False
-        add_log(f"🛑 終了 合計:{sent_count} 成功:{success_total} 失敗:{fail_total}")
+        user_sessions[uid]['is_running'] = False
+        add_user_log(uid, f"🛑 === 終了 ===")
+        add_user_log(uid, f"📊 合計:{sent_count} 成功:{success_total} 失敗:{fail_total}")
+        if fail_total > 0:
+            add_user_log(uid, "💡 失敗が多い場合：間隔を3秒以上にする / アカウントを追加する / アプリパスワードを確認")
 
-# ========== Web画面 ==========
 INDEX_HTML = """
 <!DOCTYPE html>
 <html lang="ja">
@@ -182,7 +171,6 @@ INDEX_HTML = """
         .stop { background: #cc0000; color: #fff; }
         button:disabled { opacity: 0.4; cursor: not-allowed; }
         pre { background: #111; padding: 15px; border-radius: 8px; white-space: pre-wrap; height: 350px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 10px; }
-        .example { color: #88f; font-size: 11px; margin-top: 4px; }
     </style>
 </head>
 <body>
@@ -204,11 +192,11 @@ INDEX_HTML = """
         <label>📥 送信先メールアドレス</label>
         <input type="email" id="to_address" placeholder="例: target@gmail.com">
 
-        <label>⏱ 送信間隔（秒）</label>
+        <label>⏱ 送信間隔（秒）※3秒以上推奨</label>
         <input type="number" id="interval" value="3" min="1" step="1" placeholder="例: 3">
 
         <label>📤 送信回数（0=無限）</label>
-        <input type="number" id="max_count" value="0" min="0" step="1" placeholder="例: 0">
+        <input type="number" id="max_count" value="0" min="0" step="1" placeholder="例: 2 → 2通で自動停止">
 
         <label>📝 メール件名</label>
         <input type="text" id="subject" value="【重要】お知らせ" placeholder="例: 【重要】お知らせ">
@@ -220,7 +208,7 @@ INDEX_HTML = """
     </div>
 
     <div class="card">
-        <h3>📋 実行ログ</h3>
+        <h3>📋 実行ログ（自分専用）</h3>
         <pre id="log_area">準備完了。「送信開始」を押してください。</pre>
     </div>
 
@@ -246,10 +234,13 @@ INDEX_HTML = """
                 isRunning = true;
                 document.getElementById("btn_start").disabled = true;
                 document.getElementById("btn_stop").disabled = false;
+            } else {
+                alert(json.msg || "エラー");
             }
         }
 
         async function stopSpam() {
+            if (!confirm("本当に停止しますか？")) return;
             await fetch("/stop", { method: "POST" });
             isRunning = false;
             document.getElementById("btn_start").disabled = false;
@@ -271,60 +262,85 @@ INDEX_HTML = """
 </html>
 """
 
-# ========== APIルート ==========
 @app.route("/")
 def index():
+    uid = get_user_id()
+    with lock:
+        if uid not in user_sessions:
+            user_sessions[uid] = {
+                "logs": [],
+                "is_running": False,
+                "stop_flag": threading.Event()
+            }
     return render_template_string(INDEX_HTML)
 
 
 @app.route("/start", methods=["POST"])
 def start():
-    global config
-    if is_running:
-        return jsonify({"ok": False, "msg": "実行中です"})
-
+    uid = get_user_id()
     data = request.get_json()
+
+    with lock:
+        if user_sessions[uid]['is_running']:
+            return jsonify({"ok": False, "msg": "実行中です"})
+
     accounts_text = data.get("accounts", "")
     accounts = parse_accounts(accounts_text)
 
     if not accounts:
         return jsonify({"ok": False, "msg": "アカウント情報が読み取れません。「アドレス:パスワード」形式で記入してください"})
 
-    config["accounts"] = accounts
-    config["to_address"] = data.get("to_address", "")
-    config["interval"] = float(data.get("interval", 3))
-    config["max_count"] = int(data.get("max_count", 0))
-    config["subject"] = data.get("subject", "【重要】お知らせ")
+    to_address = data.get("to_address", "")
+    interval = float(data.get("interval", 3))
+    max_count = int(data.get("max_count", 0))
+    subject = data.get("subject", "【重要】お知らせ")
 
-    thread = threading.Thread(target=send_email_thread, daemon=True)
+    if not to_address:
+        return jsonify({"ok": False, "msg": "送信先アドレスを入力してください"})
+
+    with lock:
+        user_sessions[uid]['logs'] = []
+        user_sessions[uid]['stop_flag'].clear()
+
+    thread = threading.Thread(
+        target=send_email_thread,
+        args=(uid, accounts, to_address, interval, max_count, subject),
+        daemon=True
+    )
     thread.start()
     return jsonify({"ok": True, "accounts": len(accounts)})
 
 
 @app.route("/stop", methods=["POST"])
 def stop():
-    stop_flag.set()
+    uid = get_user_id()
+    with lock:
+        if uid in user_sessions:
+            user_sessions[uid]['stop_flag'].set()
     return jsonify({"ok": True})
 
 
 @app.route("/log")
 def get_log():
+    uid = get_user_id()
     with lock:
-        return "\n".join(log_lines)
+        if uid in user_sessions:
+            return "\n".join(user_sessions[uid]['logs'])
+    return "準備完了。「送信開始」を押してください。"
 
 
 if __name__ == "__main__":
-    add_log("🚀 サーバー起動完了")
+    print("🚀 サーバー起動完了")
     
     RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
     if RENDER_EXTERNAL_URL:
         render_url = RENDER_EXTERNAL_URL
-        add_log(f"✅ RenderURL自動取得: {render_url}")
+        print(f"✅ RenderURL自動取得: {render_url}")
     else:
         render_url = "http://localhost:8080"
     
     ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
     ping_thread.start()
-    add_log("✅ スリープ回避Ping 起動完了（約4分ごとに実行）")
+    print("✅ スリープ回避Ping 起動完了")
     
     app.run(host="0.0.0.0", port=8080, debug=False)
