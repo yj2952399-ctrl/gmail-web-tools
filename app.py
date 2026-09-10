@@ -3,7 +3,6 @@ import smtplib
 import random
 import threading
 import time
-import requests
 import os
 import re
 import uuid
@@ -17,19 +16,7 @@ app.secret_key = os.urandom(32).hex()
 user_sessions = {}
 lock = threading.Lock()
 
-SLEEP_PREVENT_INTERVAL = 280
-render_url = ""
-
-def self_ping_loop():
-    time.sleep(10)
-    while True:
-        try:
-            if render_url:
-                requests.get(render_url, timeout=10)
-        except:
-            pass
-        time.sleep(SLEEP_PREVENT_INTERVAL)
-
+# ========== 複数アカウントの解析 ==========
 def parse_accounts(text):
     text = text.strip()
     if not text:
@@ -45,6 +32,7 @@ def parse_accounts(text):
             accounts.append({"address": addr.strip(), "password": pw.strip()})
     return accounts
 
+# ========== スパム文 4パターン ==========
 SPAM_PATTERNS = [
     """お前らみたいな負け組のチー牛が何を言っても無駄だっての😂
 一生その狭い頭で妄想繰り返してろよ、現実では誰にも相手にされてないくせに🤣
@@ -63,11 +51,13 @@ SPAM_PATTERNS = [
 ただの哀れな負け犬として一生終わるんだな、かわいそうに😂😂😂"""
 ]
 
+# ========== ユーザーID取得 ==========
 def get_user_id():
     if 'uid' not in session:
         session['uid'] = str(uuid.uuid4())[:8]
     return session['uid']
 
+# ========== ユーザー別ログ追加 ==========
 def add_user_log(uid, text):
     t = datetime.now().strftime("%H:%M:%S")
     line = f"[{t}] {text}"
@@ -78,6 +68,7 @@ def add_user_log(uid, text):
                 user_sessions[uid]['logs'].pop(0)
     print(f"[{uid}] {text}")
 
+# ========== メール送信本体 ==========
 def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
     sent_count = 0
     account_index = 0
@@ -109,7 +100,8 @@ def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
             msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
             try:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+                # ✅ Fly.ioでは465番ポートで普通に接続できる
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                     server.login(acc["address"], acc["password"])
                     server.send_message(msg)
                 add_user_log(uid, f"✅ {sent_count} 通目 [{acc['address']}] 送信成功")
@@ -119,20 +111,16 @@ def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
                 add_user_log(uid, f"❌ {sent_count} 通目 失敗: {err[:100]}")
                 fail_total += 1
                 if "Authentication" in err or "Username and Password" in err:
-                    add_user_log(uid, "⚠️ 認証エラー → アドレス/パスワード（アプリパスワード16文字）を確認")
-                    add_user_log(uid, "💡 パスワードにスペースが入ってる？ それは正しいです")
+                    add_user_log(uid, "⚠️ 認証エラー → アドレス/アプリパスワード確認")
                     break
-                if "timed out" in err.lower():
-                    add_user_log(uid, "⚠️ 接続タイムアウト → Googleが拒否した可能性 間隔を延ばしてみて")
                 if stop_flag.is_set():
                     add_user_log(uid, "🛑 送信中に停止されました")
                     break
                 stop_flag.wait(2)
                 continue
 
-            # ✅ 指定回数に達したら自動停止 → 明確にログ表示
             if max_count > 0 and sent_count >= max_count:
-                add_user_log(uid, f"✅ ✅ 指定の {max_count} 通に到達 → 自動停止します")
+                add_user_log(uid, f"✅ ✅ 指定の {max_count} 通に到達 → 自動停止")
                 break
 
             if not stop_flag.is_set():
@@ -144,9 +132,8 @@ def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
         user_sessions[uid]['is_running'] = False
         add_user_log(uid, f"🛑 === 終了 ===")
         add_user_log(uid, f"📊 合計:{sent_count} 成功:{success_total} 失敗:{fail_total}")
-        if fail_total > 0:
-            add_user_log(uid, "💡 失敗が多い場合：間隔を3秒以上にする / アカウントを追加する / アプリパスワードを確認")
 
+# ========== Web画面 ==========
 INDEX_HTML = """
 <!DOCTYPE html>
 <html lang="ja">
@@ -181,25 +168,25 @@ INDEX_HTML = """
         <label>🔑 Gmailアカウント</label>
         <textarea id="accounts" placeholder="例1: tarou@gmail.com:abcd efgh ijkl mnop
 例2: hanako@gmail.com:1234 5678 90ab cdef
-例3: 複数はカンマ/改行/スペースで区切る
-★ 書き方→【メールアドレス:アプリパスワード】"></textarea>
+★ 書き方→【メールアドレス:アプリパスワード】
+★ 半角コロン : で区切る！"></textarea>
         <div class="hint">
-            ✅ 1行に1アカウント：<code>メールアドレス:アプリパスワード</code> の形で書く<br>
-            ✅ 複数は改行・カンマ・スペースで区切るだけ<br>
-            ⚠️ 普通のパスワードは使えない → Googleの「アプリパスワード(16文字)」を使う
+            ✅ 1行に1アカウント：<code>メールアドレス:アプリパスワード</code><br>
+            ✅ 複数は改行・カンマ・スペースで区切る<br>
+            ⚠️ アプリパスワード(16文字)を使う！ 普通のパスワードは不可
         </div>
 
         <label>📥 送信先メールアドレス</label>
         <input type="email" id="to_address" placeholder="例: target@gmail.com">
 
         <label>⏱ 送信間隔（秒）※3秒以上推奨</label>
-        <input type="number" id="interval" value="3" min="1" step="1" placeholder="例: 3">
+        <input type="number" id="interval" value="3" min="1" step="1">
 
         <label>📤 送信回数（0=無限）</label>
-        <input type="number" id="max_count" value="0" min="0" step="1" placeholder="例: 2 → 2通で自動停止">
+        <input type="number" id="max_count" value="0" min="0" step="1">
 
         <label>📝 メール件名</label>
-        <input type="text" id="subject" value="【重要】お知らせ" placeholder="例: 【重要】お知らせ">
+        <input type="text" id="subject" value="【重要】お知らせ">
 
         <div class="btn-area">
             <button class="start" id="btn_start" onclick="startSpam()">🚀 送信開始</button>
@@ -262,6 +249,7 @@ INDEX_HTML = """
 </html>
 """
 
+# ========== APIルート ==========
 @app.route("/")
 def index():
     uid = get_user_id()
@@ -288,7 +276,7 @@ def start():
     accounts = parse_accounts(accounts_text)
 
     if not accounts:
-        return jsonify({"ok": False, "msg": "アカウント情報が読み取れません。「アドレス:パスワード」形式で記入してください"})
+        return jsonify({"ok": False, "msg": "アカウント形式エラー。「アドレス:パスワード」で書いて"})
 
     to_address = data.get("to_address", "")
     interval = float(data.get("interval", 3))
@@ -296,7 +284,7 @@ def start():
     subject = data.get("subject", "【重要】お知らせ")
 
     if not to_address:
-        return jsonify({"ok": False, "msg": "送信先アドレスを入力してください"})
+        return jsonify({"ok": False, "msg": "送信先アドレスを入力して"})
 
     with lock:
         user_sessions[uid]['logs'] = []
@@ -330,17 +318,5 @@ def get_log():
 
 
 if __name__ == "__main__":
-    print("🚀 サーバー起動完了")
-    
-    RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
-    if RENDER_EXTERNAL_URL:
-        render_url = RENDER_EXTERNAL_URL
-        print(f"✅ RenderURL自動取得: {render_url}")
-    else:
-        render_url = "http://localhost:8080"
-    
-    ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
-    ping_thread.start()
-    print("✅ スリープ回避Ping 起動完了")
-    
+    print("🚀 Gmailスパムツール 起動完了")
     app.run(host="0.0.0.0", port=8080, debug=False)
