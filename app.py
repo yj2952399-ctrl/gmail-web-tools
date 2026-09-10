@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import requests
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32).hex()
@@ -16,7 +17,25 @@ app.secret_key = os.urandom(32).hex()
 user_sessions = {}
 lock = threading.Lock()
 
-# ========== 複数アカウントの解析 ==========
+# ========== 🔄 スリープ防止：自分自身に定期アクセス ==========
+def keep_alive():
+    url = os.getenv("REPLIT_URL", "")
+    if not url:
+        try:
+            url = f"https://{os.environ['REPL_SLUG']}.{os.environ['REPL_OWNER']}.repl.co"
+        except:
+            url = ""
+    print(f"🔄 キープアライブURL: {url}")
+    while True:
+        try:
+            if url:
+                requests.get(url, timeout=10)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 キープアライブ実行 → スリープ防止")
+        except Exception as e:
+            print(f"キープアライブエラー: {e}")
+        time.sleep(180)  # 3分ごとに実行
+
+# ========== アカウント解析 ==========
 def parse_accounts(text):
     text = text.strip()
     if not text:
@@ -32,23 +51,45 @@ def parse_accounts(text):
             accounts.append({"address": addr.strip(), "password": pw.strip()})
     return accounts
 
-# ========== スパム文 4パターン ==========
+# ========== 💥 スパム文 10パターン 強化版 ==========
 SPAM_PATTERNS = [
-    """お前らみたいな負け組のチー牛が何を言っても無駄だっての😂
-一生その狭い頭で妄想繰り返してろよ、現実では誰にも相手にされてないくせに🤣
-人間としての価値すら怪しいレベルで生きてて恥ずかしくないの？www""",
+    """おーい、生きてるー？？ お前みたいな役立たずが何を頑張っても無駄だって早く気づけよ😂
+一生その狭い頭で妄想ばっかり繰り返して、現実では誰にも相手にされてないの気づいてる？🤣
+人間としての価値すら怪しいレベルで生きてて恥ずかしくないの？ まじで消えた方がいいよwww""",
 
-    """ねえ、自分が何様だと思ってるの？
-ただのカスみたいな人生送ってるくせに偉そうにするなよ🤏
-周りの全員がお前のことを見下してるの、そろそろ気づけよ無能😂""",
+    """ねえ、自分が何様だと思ってるの？ ただのカスみたいな人生送ってるくせに偉そうにするなよ🤏
+周りの全員がお前のことを心底見下してるの、そろそろ気づけよ無能😂
+お前が存在するだけで周りが迷惑してるって、親に教えてもらわなかったの？""",
 
-    """まともな反論もできないで逃げ回ってるだけのゴミが何言っても無駄ww
-お前の存在そのものが周りの迷惑だってこと、親にでも教えてもらわなかったの？🤣
-生まれてきたことが最大の過ちレベル、さっさと消えろよ""",
+    """まともな反論もできないで逃げ回ってるだけのゴミが何言っても無駄だってww
+お前の存在そのものがゴミ以下なんだよ？ 生まれてきたことが最大の過ちレベル🤣
+さっさと消えて、どうぞ。誰も探さないから安心して😂""",
 
-    """そのしょうもない脳みそで少しは考えてみろよ
-誰もお前のことなんて認めてないし、誰もお前に興味なんてない🤣
-ただの哀れな負け犬として一生終わるんだな、かわいそうに😂😂😂"""
+    """そのしょうもない脳みそで少しは考えてみろよ。あ、無理かw お前には難しいよな🤣
+誰もお前のことなんて認めてないし、誰もお前に興味なんてないの。ただの哀れな負け犬😂
+一生そうやって誰かの陰で震えて生きていけ。お前にはそれがお似合いだよ""",
+
+    """お前さ、自分が何をやっても中途半端で終わるの、なんでかわかる？ 頭も悪いし根性もないし、何一つまともに続かないからだよ😂
+それでいて偉そうなんだから笑えるよね。まじで生きてる価値ある？ よく考えてみろよwww""",
+
+    """見てるとイライラするんだよね。何もできないくせに態度だけは一人前で、全部人のせいにして、自分は悪くないと思ってる。
+そうやって甘えてるから一生成長しないんだよ。お前が今置かれてる状況は全部お前自身のせいだからな😂""",
+
+    """可哀想だね〜 何をやってもうまくいかなくて、誰からも相手にされなくて、一人で寂しくないの？😂
+あ、それがお前の平常運転だったね！ 悪いな、悪いなw でも事実だから仕方ないよね🤣
+誰もお前の味方なんていないよ。孤独な負け犬、おつかれさま〜""",
+
+    """言っておくけど、お前がどれだけ頑張ったところで、結果なんて見えてるんだよ。
+だって根本的に「能力がない」んだから。それを認めたくなくて喚いてるだけ。
+そうやって現実逃避してる間にも、周りはどんどん先に行く。お前だけがいつまでもそこに立ち止まってる😂""",
+
+    """お前の発言って全部が全部的外れで、聞いてるこっちが恥ずかしくなるんだよね😂
+「こいつ本気で言ってるの？」って。周りの人たち内心全部笑ってるよ？ お前のこと。
+それにいつ気づくの？ 一生気づかないまま死んでいくのがお前らしいけどwww""",
+
+    """最後に言っておくけど、お前がどれだけ足掻いても、何も変わらないよ。
+だってお前自身が変わる気がないんだから。いつも誰かのせい、環境のせい。
+そうやって一生言い訳して生きていくんだな。それがお前の選んだ道だ。好きにすればいい😂"""
 ]
 
 # ========== ユーザーID取得 ==========
@@ -57,7 +98,7 @@ def get_user_id():
         session['uid'] = str(uuid.uuid4())[:8]
     return session['uid']
 
-# ========== ユーザー別ログ追加 ==========
+# ========== ログ出力 ==========
 def add_user_log(uid, text):
     t = datetime.now().strftime("%H:%M:%S")
     line = f"[{t}] {text}"
@@ -84,6 +125,7 @@ def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
         add_user_log(uid, f"✅ アカウント数: {len(accounts)} 個")
         add_user_log(uid, f"✅ 送信開始 → {to_address}")
         add_user_log(uid, f"⏱ 送信間隔: {interval}秒 / 📤 送信回数: {max_txt}")
+        add_user_log(uid, f"💬 メッセージパターン数: {len(SPAM_PATTERNS)}")
 
         while not stop_flag.is_set():
             sent_count += 1
@@ -100,7 +142,6 @@ def send_email_thread(uid, accounts, to_address, interval, max_count, subject):
             msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
             try:
-                # ✅ Fly.ioでは465番ポートで普通に接続できる
                 with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                     server.login(acc["address"], acc["password"])
                     server.send_message(msg)
@@ -171,7 +212,7 @@ INDEX_HTML = """
 ★ 書き方→【メールアドレス:アプリパスワード】
 ★ 半角コロン : で区切る！"></textarea>
         <div class="hint">
-            ✅ 1行に1アカウント：<code>メールアドレス:アプリパスワード</code><br>
+            ✅ 1行に1アカウント：メールアドレス:アプリパスワード<br>
             ✅ 複数は改行・カンマ・スペースで区切る<br>
             ⚠️ アプリパスワード(16文字)を使う！ 普通のパスワードは不可
         </div>
@@ -249,55 +290,36 @@ INDEX_HTML = """
 </html>
 """
 
-# ========== APIルート ==========
+# ========== ルーティング ==========
 @app.route("/")
 def index():
     uid = get_user_id()
     with lock:
         if uid not in user_sessions:
-            user_sessions[uid] = {
-                "logs": [],
-                "is_running": False,
-                "stop_flag": threading.Event()
-            }
+            user_sessions[uid] = {"logs": [], "is_running": False, "stop_flag": threading.Event()}
     return render_template_string(INDEX_HTML)
-
 
 @app.route("/start", methods=["POST"])
 def start():
     uid = get_user_id()
     data = request.get_json()
-
     with lock:
         if user_sessions[uid]['is_running']:
             return jsonify({"ok": False, "msg": "実行中です"})
-
-    accounts_text = data.get("accounts", "")
-    accounts = parse_accounts(accounts_text)
-
+    accounts = parse_accounts(data.get("accounts", ""))
     if not accounts:
         return jsonify({"ok": False, "msg": "アカウント形式エラー。「アドレス:パスワード」で書いて"})
-
     to_address = data.get("to_address", "")
+    if not to_address:
+        return jsonify({"ok": False, "msg": "送信先アドレスを入力して"})
     interval = float(data.get("interval", 3))
     max_count = int(data.get("max_count", 0))
     subject = data.get("subject", "【重要】お知らせ")
-
-    if not to_address:
-        return jsonify({"ok": False, "msg": "送信先アドレスを入力して"})
-
     with lock:
         user_sessions[uid]['logs'] = []
         user_sessions[uid]['stop_flag'].clear()
-
-    thread = threading.Thread(
-        target=send_email_thread,
-        args=(uid, accounts, to_address, interval, max_count, subject),
-        daemon=True
-    )
-    thread.start()
+    threading.Thread(target=send_email_thread, args=(uid, accounts, to_address, interval, max_count, subject), daemon=True).start()
     return jsonify({"ok": True, "accounts": len(accounts)})
-
 
 @app.route("/stop", methods=["POST"])
 def stop():
@@ -307,7 +329,6 @@ def stop():
             user_sessions[uid]['stop_flag'].set()
     return jsonify({"ok": True})
 
-
 @app.route("/log")
 def get_log():
     uid = get_user_id()
@@ -316,7 +337,10 @@ def get_log():
             return "\n".join(user_sessions[uid]['logs'])
     return "準備完了。「送信開始」を押してください。"
 
-
+# ========== 起動時にキープアライブ開始 ==========
 if __name__ == "__main__":
     print("🚀 Gmailスパムツール 起動完了")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    print("🔄 キープアライブ機能 → 有効（3分ごとに実行）")
+    print("💬 メッセージパターン → 10種類")
+    threading.Thread(target=keep_alive, daemon=True).start()
+    app.run(host="0.0.0.0", port=8080)
